@@ -1,0 +1,11 @@
+# Minimal Python dependencies for auto_trap.py
+# Adjust versions if needed for your environment.
+
+numpy
+opencv-python
+cffi
+pylablib
+# thorlabs-tsi-sdk>=0.7.0
+
+# Optional (only if you need the GUI version of OpenCV):
+# opencv-python>=4.7

@@ -28,6 +28,23 @@ from typing import Iterable, Iterator, Optional, Tuple
 import cv2
 import numpy as np
 from cffi import FFI
+import pylablib
+
+# Compatibility shim for older pylablib (<=1.4.4):
+# some pylablib releases use a different name for the FTDI/FT232 backend
+# and code (or third-party libs) may expect `FT232DeviceBackend`. If the
+# attribute is missing, try to alias it to whatever backend is available.
+try:
+    import pylablib.core.devio.comm_backend as _comm_backend
+except Exception:
+    _comm_backend = None
+
+if _comm_backend is not None and not hasattr(_comm_backend, "FT232DeviceBackend"):
+    for _alt in ("FT232HDeviceBackend", "FT2XXDeviceBackend", "FTDIBackend", "FTDIDeviceBackend", "SerialDeviceBackend"):
+        if hasattr(_comm_backend, _alt):
+            setattr(_comm_backend, "FT232DeviceBackend", getattr(_comm_backend, _alt))
+            break
+
 from pylablib.devices import Thorlabs
 from thorlabs_tsi_sdk.tl_camera import TLCameraSDK
 
@@ -76,20 +93,79 @@ def ensure_dll() -> None:
 
 
 def connect_motors() -> Tuple[Thorlabs.KinesisMotor, Thorlabs.KinesisMotor, Thorlabs.KinesisMotor]:
-    """Open motors by serial. Raises if any not found."""
-    devices = {str(sn): info for sn, info in Thorlabs.list_kinesis_devices()}
-    missing = [sn for sn in (SERIAL_X, SERIAL_Y, SERIAL_Z) if sn not in devices]
+    """Open motors by serial. More robust to different pylablib return types and
+    provides diagnostic output and substring matching fallbacks.
+    """
+    raw = Thorlabs.list_kinesis_devices()
+
+    # Normalize into a dict mapping string-serial -> info
+    devices: dict = {}
+    try:
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                devices[str(k)] = v
+        elif isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, tuple) and len(item) >= 1:
+                    sn = item[0]
+                    info = item[1] if len(item) > 1 else None
+                    devices[str(sn)] = info
+                else:
+                    devices[str(item)] = None
+        else:
+            # fallback: try to iterate
+            for k, v in dict(raw).items():
+                devices[str(k)] = v
+    except Exception:
+        # best-effort fallback
+        try:
+            for item in raw:
+                devices[str(item)] = None
+        except Exception:
+            pass
+
+    print(f"[DEBUG] Detected Kinesis devices: {list(devices.keys())}")
+
+    def _find_serial(preferred: str) -> Optional[str]:
+        # Exact match
+        if preferred in devices:
+            return preferred
+        # Substring match in serial strings
+        for sn in devices:
+            if preferred and preferred in sn:
+                return sn
+        # Try looking in info dicts for serial-like fields
+        for sn, info in devices.items():
+            try:
+                if info is None:
+                    continue
+                s = str(info)
+                if preferred and preferred in s:
+                    return sn
+            except Exception:
+                continue
+        return None
+
+    sx = _find_serial(SERIAL_X)
+    sy = _find_serial(SERIAL_Y)
+    sz = _find_serial(SERIAL_Z)
+
+    missing = [name for name, found in (("X", sx), ("Y", sy), ("Z", sz)) if found is None]
     if missing:
-        raise RuntimeError(f"Missing motors: {missing}. Found: {list(devices.keys())}")
+        raise RuntimeError(
+            f"Missing motors: {missing}. Found devices: {list(devices.keys())}.\n"
+            "If the serials in this script are incorrect, set SERIAL_X/SERIAL_Y/SERIAL_Z to one of the listed ids "
+            "or export environment variables to override."
+        )
 
     def open_motor(sn: str) -> Thorlabs.KinesisMotor:
         m = Thorlabs.KinesisMotor(sn, scale=MOTOR_SCALE)
         m.open()
         return m
 
-    mx = open_motor(SERIAL_X)
-    my = open_motor(SERIAL_Y)
-    mz = open_motor(SERIAL_Z)
+    mx = open_motor(sx)
+    my = open_motor(sy)
+    mz = open_motor(sz)
     return mx, my, mz
 
 
